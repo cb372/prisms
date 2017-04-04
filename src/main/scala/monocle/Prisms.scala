@@ -1,6 +1,6 @@
 package monocle
 
-import scala.reflect.macros.blackbox
+import scala.reflect.macros.{blackbox,whitebox}
 import scala.language.experimental.macros
 
 class Prisms extends scala.annotation.StaticAnnotation {
@@ -15,30 +15,15 @@ class PrismsImpl(val c: blackbox.Context) {
       case (traitDef @ q"$mods trait $tpname[..$tparams] extends { ..$earlydefns } with ..$parents { $self => ..$stats }")
         :: Nil if mods.hasFlag(Flag.SEALED) =>
 
-        val tpe = c.typecheck(Ident(tpname), mode = c.TYPEmode, silent = true, withMacrosDisabled = true)
+        val name = tpname.toTermName
 
-        /*
-        Comment out the following two lines and the macro expands fine (but doesn't do anything interesting).
+        q"""
+        $traitDef
 
-        Leave them in and you get weirdness ...
-
-        `knownDirectSubclasses` works (so long SI-7046!), so it prints "Subclasses: Set(class Y, class Z)",
-        but then the macro fails to expand:
-
-        ---
-[error] /Users/chris/code/prisms/src/test/scala/example/Example.scala:5: macro annotation could not be expanded (the most common reason for that is that you need to enable the macro paradise plugin; another possibility is that you try to use macro annotation in the same compilation run that defines it)
-[error] @Prisms
-[error]  ^
-[error] one error found
-        ---
-
-        Similar code works fine in the def macro below.
-        Maybe the problem is calling `knownDirectSubclasses` on the result of a call to `c.typecheck`?
-         */
-        val subs = tpe.symbol.asClass.knownDirectSubclasses
-        println(s"Subclasses: $subs")
-
-        traitDef
+        object $name {
+          val prisms = _root_.monocle.DefMacros.genPrisms[$tpname]
+        }
+        """
 
       case _ => c.abort(c.enclosingPosition, "sorry")
     }
@@ -46,19 +31,57 @@ class PrismsImpl(val c: blackbox.Context) {
 
 }
 
-object DefMacro {
+trait Marker
 
-  def printSubclasses[A]: Int = macro impl[A]
+trait Prism[A, B] {
+  def getOption(a: A): Option[B]
+}
 
-  def impl[A: c.WeakTypeTag](c: blackbox.Context): c.Tree = {
-    import c.universe._
+import scala.language.dynamics
 
+object DefMacros {
+
+  class DynamicPrisms[A] extends Marker with Dynamic {
+    def selectDynamic(name: String): Any = macro _root_.monocle.DefMacrosImpl.genPrism_impl[A]
+  }
+
+  def genPrisms[A]: DynamicPrisms[A] = macro DefMacrosImpl.genPrisms_impl[A]
+
+}
+
+class DefMacrosImpl(val c: whitebox.Context) {
+  import c.universe._
+
+  def genPrism_impl[A: c.WeakTypeTag](name: c.Expr[String]): c.Tree = {
+    val A = weakTypeOf[A]
+
+    val subclassName = name.tree match {
+      case Literal(Constant(str: String)) => str
+      case _ => c.abort(c.enclosingPosition, "nope")
+    }
+
+    val subs = A.typeSymbol.asClass.knownDirectSubclasses
+    subs.find(_.name.toString == subclassName) match {
+      case Some(subclass) =>
+        val B = subclass.info.typeSymbol
+        q"""
+        new Prism[$A, $B] {
+          def getOption(a: $A): Option[$B] =
+            if (a.isInstanceOf[$B]) Some(a.asInstanceOf[$B]) else None
+        }
+        """
+      case None =>
+        c.abort(c.enclosingPosition, s"$subclassName is not a direct subclass of $A")
+
+    }
+
+  }
+
+  def genPrisms_impl[A: c.WeakTypeTag]: c.Tree = {
     val tpe = weakTypeOf[A]
-
-    val subs = tpe.typeSymbol.asClass.knownDirectSubclasses
-    println(s"Def macro: $subs")
-
-    q"42"
+    q"""
+    new _root_.monocle.DefMacros.DynamicPrisms[$tpe]
+    """
   }
 
 }

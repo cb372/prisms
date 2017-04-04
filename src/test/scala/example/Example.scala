@@ -2,8 +2,6 @@ package example
 
 import monocle._
 
-import scala.language.dynamics
-
 @Prisms
 sealed trait X
 
